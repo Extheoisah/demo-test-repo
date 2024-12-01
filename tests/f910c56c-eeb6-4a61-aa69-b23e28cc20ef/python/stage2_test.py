@@ -1,122 +1,106 @@
 import pytest
-from main import (
-    create_transaction,
-    UTXO,
-    Transaction,
-    TransactionInput,
-    TransactionOutput
-)
+from main import MultisigWallet
+from bitcoinutils.setup import setup
+from bitcoinutils.transactions import Transaction, TxInput, TxOutput
+from bitcoinutils.keys import P2wpkhAddress
+import re
 
-# Test fixtures
-@pytest.fixture
-def valid_utxo():
-    return {
-        "txid": "7ea75da574ebff364f0f4cc9d0315b7d9523f7f38558918aff8570842cba74c9",
-        "vout": 0,
-        "value": 50000
-    }
+# Setup bitcoin-utils for testing
+setup('testnet')
 
-@pytest.fixture
-def valid_private_key():
-    return "1e99423a4ed27608a15a2616c2b3b3a4a1a3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
-
-@pytest.fixture
-def valid_target_address():
-    return "2N8hwP1WmJrFF5QWABn38y63uYLhnJYJYTF"
-
-# Tests
-def test_creates_valid_transaction_with_sufficient_funds(valid_utxo, valid_target_address, valid_private_key):
-    utxos = [valid_utxo]
-    amount = 30000
-
-    result = create_transaction(utxos, valid_target_address, amount, valid_private_key)
-    assert result is not None
-    assert isinstance(result, str)
-    assert all(c in '0123456789abcdef' for c in result.lower())
-    assert len(result) > 0
-
-def test_throws_error_with_insufficient_funds(valid_target_address, valid_private_key):
-    utxos = [{
-        "txid": "7ea75da574ebff364f0f4cc9d0315b7d9523f7f38558918aff8570842cba74c9",
-        "vout": 0,
-        "value": 500
-    }]
-    amount = 1000
-
-    with pytest.raises(ValueError, match="Insufficient funds"):
-        create_transaction(utxos, valid_target_address, amount, valid_private_key)
-
-def test_validates_all_required_parameters(valid_utxo, valid_target_address, valid_private_key):
-    utxos = [valid_utxo]
-    amount = 30000
-
-    # Test missing private key
-    with pytest.raises(ValueError, match="Private key is missing"):
-        create_transaction(utxos, valid_target_address, amount, "")
-
-    # Test missing UTXOs
-    with pytest.raises(ValueError, match="No UTXOs provided"):
-        create_transaction([], valid_target_address, amount, valid_private_key)
-
-    # Test missing target address
-    with pytest.raises(ValueError, match="Target address is missing"):
-        create_transaction(utxos, "", amount, valid_private_key)
-
-    # Test invalid amount
-    with pytest.raises(ValueError, match="Invalid amount"):
-        create_transaction(utxos, valid_target_address, 0, valid_private_key)
-    with pytest.raises(ValueError, match="Invalid amount"):
-        create_transaction(utxos, valid_target_address, -1000, valid_private_key)
-
-def test_handles_multiple_utxos_correctly(valid_target_address, valid_private_key):
-    utxos = [
-        {
-            "txid": "7ea75da574ebff364f0f4cc9d0315b7d9523f7f38558918aff8570842cba74c9",
-            "vout": 0,
-            "value": 30000
-        },
-        {
-            "txid": "8ea75da574ebff364f0f4cc9d0315b7d9523f7f38558918aff8570842cba74c9",
-            "vout": 1,
-            "value": 20000
+class TestSolutionMultisigWallet:
+    
+    def test_init_validation(self):
+        """Test wallet initialization validation"""
+        # Solution should work with valid parameters
+        solution = MultisigWallet(2, 3)
+        assert solution.required_signatures == 2
+        assert solution.total_signers == 3
+        
+        # Solution should raise error for invalid parameters
+        with pytest.raises(ValueError):
+            MultisigWallet(4, 3)  # required > total
+        with pytest.raises(ValueError):
+            MultisigWallet(0, 3)  # required <= 0
+    
+    def test_wallet_generation(self):
+        """Test wallet generation process"""
+        solution = MultisigWallet(2, 3)
+        solution.generate_wallet()
+        
+        # Check if correct number of keypairs generated
+        assert len(solution.key_pairs) == 3
+        
+        # Check if addresses were generated
+        assert solution.addresses is not None
+        assert 'p2sh' in solution.addresses
+        assert 'p2wsh' in solution.addresses
+    
+    def test_key_pair_generation(self):
+        """Test individual keypair generation"""
+        solution = MultisigWallet(2, 3)
+        key_pair = solution.generate_key_pair(0)
+        
+        # Check key pair structure
+        assert 'mnemonic' in key_pair
+        assert 'path' in key_pair
+        assert 'public_key' in key_pair
+        assert 'private_key' in key_pair
+        
+        # Check path format
+        assert re.match(r"m/49'/0'/0'/0/\d+", key_pair['path'])
+    
+    def test_multisig_address_creation(self):
+        """Test multisig address creation"""
+        solution = MultisigWallet(2, 3)
+        solution.generate_wallet()
+        solution.create_multisig_addresses()
+        
+        # Check address formats
+        assert isinstance(solution.addresses['p2sh'], str)
+        assert isinstance(solution.addresses['p2wsh'], str)
+        assert solution.addresses['p2sh'].startswith('2') or solution.addresses['p2sh'].startswith('3')
+        assert solution.addresses['p2wsh'].startswith('tb1')
+    
+    def test_transaction_signing(self):
+        """Test transaction signing"""
+        solution = MultisigWallet(2, 3)
+        solution.generate_wallet()
+        
+        # Create a dummy transaction with a valid hex txid (non-coinbase)
+        tx_input = TxInput("a" * 64, 0)  # Use a different valid 64-character hex string
+        
+        # Create proper output script
+        addr = P2wpkhAddress('tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx')
+        script_pubkey = addr.to_script_pub_key()
+        tx_output = TxOutput(1000, script_pubkey)
+        
+        tx = Transaction([tx_input], [tx_output])
+        
+        # Test signing
+        key_pair = solution.key_pairs[0]
+        signed_tx = solution.sign_transaction(tx.to_hex(), 0, key_pair)
+        
+        assert signed_tx is not None
+        assert isinstance(signed_tx, str)  # Full transaction returned
+    
+    def test_config_handling(self):
+        """Test configuration handling"""
+        config = {
+            'derivation_path': "m/84'/0'/0'/0"
         }
-    ]
-    amount = 45000
-
-    result = create_transaction(utxos, valid_target_address, amount, valid_private_key)
-    assert result is not None
-    assert isinstance(result, str)
-    assert all(c in '0123456789abcdef' for c in result.lower())
-
-def test_creates_correct_change_output(valid_utxo, valid_target_address, valid_private_key):
-    utxos = [valid_utxo]
-    amount = 30000
-
-    result = create_transaction(utxos, valid_target_address, amount, valid_private_key)
-    assert result is not None
-    assert len(result) > 200  # Approximate length check
-
-def test_creates_transaction_with_correct_format(valid_utxo, valid_target_address, valid_private_key):
-    utxos = [valid_utxo]
-    amount = 30000
-
-    result = create_transaction(utxos, valid_target_address, amount, valid_private_key)
-
-    # Version should be first 8 characters (4 bytes)
-    assert result[:8] == "01000000"
-
-    # Transaction should end with locktime (4 bytes)
-    assert result[-8:] == "00000000"
-
-def test_handles_invalid_utxo_format(valid_target_address, valid_private_key):
-    invalid_utxos = [{
-        "vout": 0,
-        "value": 50000
-    }]  # Missing txid
-    amount = 30000
-
-    with pytest.raises(Exception):
-        create_transaction(invalid_utxos, valid_target_address, amount, valid_private_key)
-
-if __name__ == "__main__":
-    pytest.main([__file__])
+        
+        # Solution wallet should use config
+        solution = MultisigWallet(2, 3, config)
+        assert solution.derivation_path == "m/84'/0'/0'/0"
+    
+    def test_mnemonic_strength(self):
+        """Test mnemonic generation strength"""
+        solution = MultisigWallet(2, 3)
+        key_pair = solution.generate_key_pair(0)
+        
+        # Count words in mnemonic (24 words for 256 bits)
+        word_count = len(key_pair['mnemonic'].split())
+        expected_words = 256 // 32 * 3
+        
+        assert word_count == expected_words
